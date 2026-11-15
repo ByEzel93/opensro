@@ -122,12 +122,32 @@ export function createCharacterResources(
 
 	/*
 	================
+	heldClasses
+
+	The source classes held back for undecoded sources besides `except`:
+	this frame's reservations, and every load in flight with no cost and
+	no reservation yet (one a group planned in an earlier frame, before
+	that group plans again). plan and retainWanted hold the same, so a
+	cold source planned first cannot take the room of a load in flight,
+	which retainWanted would then cancel.
+	================
+	*/
+	function heldClasses( except: readonly string[] = [] ): number {
+		let held = reservations.size;
+		for ( const path of jobs.keys() ) {
+			if ( !costs.has( path ) && !reservations.has( path ) && !except.includes( path ) ) held++;
+		}
+		return held;
+	}
+
+	/*
+	================
 	plan
 
 	Charge shared sources once and reserve each undecoded source a slot
 	holds or can start. Planning an undecoded source needs a source class
-	of headroom for it and for every other reservation; a decoded source
-	is never held back by them.
+	of headroom for it and for every other held class (heldClasses); a
+	decoded source is never held back by them.
 	================
 	*/
 	function plan( paths: readonly string[] ): boolean {
@@ -146,7 +166,8 @@ export function createCharacterResources(
 		const bytes = extra.reduce( ( sum, path ) => sum + (costs.get( path ) ?? 0), 0 );
 		if (
 			planned.size + extra.length > CHARACTER_MODELS ||
-			plannedBytes + bytes + (cold.length ? (reservations.size + unheld.length) * CHARACTER_SOURCE_BYTES : 0) >
+			plannedBytes + bytes +
+						(cold.length ? (heldClasses( unheld ) + unheld.length) * CHARACTER_SOURCE_BYTES : 0) >
 				CHARACTER_RESIDENT_BYTES
 		) return false;
 		for ( const path of paths ) {
@@ -455,9 +476,7 @@ export function createCharacterResources(
 			// models in the remaining bounded budget, most recently used first.
 			// Each in-flight source class is held back, so inactive cache entries
 			// retire before the next poll can admit its decode.
-			let held = reservations.size;
-			for ( const path of jobs.keys() ) if ( !costs.has( path ) && !reservations.has( path ) ) held++;
-			let bytes = plannedBytes + held * CHARACTER_SOURCE_BYTES,
+			let bytes = plannedBytes + heldClasses() * CHARACTER_SOURCE_BYTES,
 				count = planned.size;
 			const keep = new Set( planned );
 			for ( const path of [ ...loaded ].reverse() ) {
