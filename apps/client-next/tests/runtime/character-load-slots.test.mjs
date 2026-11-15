@@ -24,10 +24,11 @@ const MODEL = { nodes: [], primitives: [], images: [], clips: [] };
 fakeWorld
 
 Four request slots shared with `others` loads of other owners; a fetch
-finishes when the test says so.
+finishes when the test says so, with the model `models` names for its
+path (an empty one otherwise).
 ================
 */
-function fakeWorld( others = 0 ) {
+function fakeWorld( others = 0, models = new Map() ) {
 	let nextId = 1;
 	const inFlight = new Map(), done = new Set(), started = [], cancelled = [], admitted = [];
 	const assets = {
@@ -46,7 +47,7 @@ function fakeWorld( others = 0 ) {
 			inFlight.delete( id );
 			return path.endsWith( ".json" ) ?
 				{ kind: "bytes", id, buffer: new TextEncoder().encode( path ).buffer } :
-				{ kind: "character", id, model: MODEL, images: [] };
+				{ kind: "character", id, model: models.get( path ) ?? MODEL, images: models.get( path )?.images ?? [] };
 		},
 		cancel( id ) {
 			cancelled.push( inFlight.get( id ) );
@@ -140,4 +141,47 @@ test("byte sources that land together are each delivered, in completion order", 
 	assert.equal( first?.path, manifests[0] );
 	assert.equal( second?.path, manifests[1] );
 	assert.equal( resources.poll(), null );
+});
+
+test("a cold source planned first does not take the room of a load in flight", async () => {
+	const { characterBytes, CHARACTER_RESIDENT_BYTES, CHARACTER_SOURCE_BYTES } = await import(
+		"../../src/engine/foundation/animation/character-budget.ts"
+	);
+	// Decoded sources that bring the frame within two source classes of the
+	// resident budget: one more class fits, two do not.
+	const big = { ...MODEL, images: [ { width: 1024, height: 1024 } ] };
+	const cost = characterBytes( big, big.images );
+	const count = Math.floor( (CHARACTER_RESIDENT_BYTES - 2 * CHARACTER_SOURCE_BYTES) / cost ) + 1;
+	assert.ok( count * cost + CHARACTER_SOURCE_BYTES <= CHARACTER_RESIDENT_BYTES );
+	assert.ok( count * cost + 2 * CHARACTER_SOURCE_BYTES > CHARACTER_RESIDENT_BYTES );
+	const fillers = Array.from( { length: count }, ( _, i ) => `/assets/char/filler${i}.glb` );
+	const world = fakeWorld( 0, new Map( fillers.map( path => [ path, big ] ) ) ), resources = world.resources;
+	const inFlight = "/assets/char/j1.glb", newcomer = "/assets/char/c.glb";
+	let seconds = 0;
+	/*
+	================
+	frame
+
+	One frame: every group plans and asks for its source in order, then
+	the frame retains what it wants and admits what landed.
+	================
+	*/
+	const frame = groups => {
+		resources.begin( ++seconds );
+		const planned = groups.map( path => resources.plan( [ path ] ) && (resources.ready( path ), true) );
+		resources.retainWanted( [] );
+		resources.poll();
+		return planned;
+	};
+	for ( const path of fillers ) world.done.add( path );
+	while ( world.admitted.length < fillers.length ) frame( fillers );
+	// J1 starts and stays in flight.
+	assert.deepStrictEqual( frame( [ ...fillers, inFlight ] ).at( -1 ), true );
+	assert.ok( world.started.includes( inFlight ) );
+	// Next frame a newcomer's cold source plans before J1's group does.
+	const planned = frame( [ ...fillers, newcomer, inFlight ] );
+	assert.equal( planned.at( -2 ), false, "the newcomer waits: J1 holds the last class" );
+	assert.equal( planned.at( -1 ), true, "J1's group still plans" );
+	assert.ok( !world.cancelled.includes( inFlight ), "J1 is not cancelled" );
+	assert.ok( !world.started.includes( newcomer ) );
 });
